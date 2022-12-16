@@ -1,0 +1,62 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: build-pipeline
+spec:
+  workspaces:
+    - name: source-pvc
+    - name: basic-auth
+    - name: test-results-pvc
+  params:
+    - name: repo-url
+    - name: revision
+    - name: pull-request-number
+    - name: application-name
+    - name: perform-unit-test
+    - name: application-imageurl
+  tasks:
+    - name: fetch-repository
+      taskRef:
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: source-pvc
+        - name: basic-auth
+          workspace: basic-auth
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+    - name: build-app
+      taskRef:
+        name: build-csharp
+      runAfter:
+        - fetch-repository
+      workspaces:
+        - name: output
+          workspace: source-pvc
+        - name: test-results
+          workspace: test-results-pvc
+      params:
+        - name: IMAGE_NAME
+          value: $(params.application-imageurl)
+        - name: APP_GIT_DIRECTORY
+          value: ""
+        - name: APPLICATION_NAME
+          value: $(params.application-name)
+        - name: PERFORM_UNIT_TEST
+          value: $(params.perform-unit-test)
+        - name: LOGLEVEL
+          value: '5'
+        - name: UNIT_TEST_FOLDER
+          value: $(context.pipelineRun.name)
+  finally:
+    - name: send-comment
+      taskRef:
+        name: github-add-comment
+      params:
+        - name: REQUEST_URL
+          value: "$(params.repo-url)/pull/$(params.pull-request-number)"
+        - name: COMMENT_OR_FILE
+          value: "TEST COMMENT"

@@ -1,0 +1,139 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-csharp
+spec:
+  description: >-
+    Source-to-Image (S2I) is a toolkit and workflow for building reproducible
+    container images from source code
+
+    S2I produces images by injecting source code into a base S2I container image
+    and letting the container prepare that source code for execution. The base
+    S2I container images contains the language runtime and build tools needed
+    for building and running the source code.
+  params:
+    - description: Reference of the image S2I will produce.
+      name: IMAGE_NAME
+      type: string
+    - description: >-
+        subdirectory inside the "output" workspace in which the git repo has
+        been cloned
+      name: APP_GIT_DIRECTORY
+      type: string
+    - description: 'Name for the s2i tag, must be in lowercase'
+      name: APPLICATION_NAME
+      type: string
+    - default: 'true'
+      description: boolean value if build should be tested or not
+      name: PERFORM_UNIT_TEST
+      type: string
+    - default: '1'
+      description: >-
+        Log level used for running the S2I binary
+        https://github.com/openshift/source-to-image/blob/master/docs/cli.md#log-levels
+      name: LOGLEVEL
+      type: string
+    - default: testresult
+      description: Folder for unittests results
+      name: UNIT_TEST_FOLDER
+      type: string
+  results:
+    - description: Digest of the image just built.
+      name: IMAGE_DIGEST
+      type: string
+    - description: File with unit test results.
+      name: UNIT_TEST_LOG
+      type: string
+  steps:
+    - image: quay.io/openshift-pipeline/s2i
+      name: build-source-and-run-possible-tests
+      resources:
+        limits:
+          cpu: 200m
+          memory: 700Mi
+        requests:
+          cpu: 100m
+          memory: 700Mi
+      script: >               
+        # Edit the environment variables
+
+        if [[ "$(params.PERFORM_UNIT_TEST)" == "true" ]]; then
+
+          echo 'Unit tests scheduled'
+        else
+
+          echo "Skip unit-tests"
+
+          sed -i '/DOTNET_TEST_PROJECTS/d' .s2i/environment
+        fi
+
+        # Perform the actual build
+                
+        s2i build . registry.access.redhat.com/ubi8/dotnet-60
+        $(params.APPLICATION_NAME) -c  --as-dockerfile
+        /gen-source/Dockerfile.gen --context-dir . --loglevel=$(params.LOGLEVEL)
+      volumeMounts:
+        - mountPath: /gen-source
+          name: gen-source
+      workingDir: $(workspaces.output.path)/$(params.APP_GIT_DIRECTORY)
+    - env:
+        - name: GODEBUG
+          value: asyncpreemptoff=1
+      image: registry.redhat.io/rhel8/buildah
+      name: build-into-container-image-and-push-to-container-registry
+      resources:
+        limits:
+          cpu: '1'
+          memory: 700Mi
+        requests:
+          cpu: 200m
+          memory: 700Mi
+      script: >
+        mkdir $(workspaces.test-results.path)/$(params.UNIT_TEST_FOLDER)
+
+        cat /gen-source/Dockerfile.gen
+
+        sed '/^USER 1001/i RUN chown -R 1001:0 \/test-results'
+        /gen-source/Dockerfile.gen > /gen-source/Dockerfile2.gen
+
+        cat /gen-source/Dockerfile2.gen
+
+        buildah --format=docker bud --tls-verify='true' --layers -f
+        /gen-source/Dockerfile2.gen -t $(params.IMAGE_NAME)
+        --volume=$(workspaces.test-results.path)/$(params.UNIT_TEST_FOLDER):/test-results
+        .
+
+        buildah push --tls-verify='true' --digestfile
+        $(workspaces.output.path)/image-digest \
+
+        $(params.IMAGE_NAME) docker://$(params.IMAGE_NAME)
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: varlibcontainers
+        - mountPath: /gen-source
+          name: gen-source
+      workingDir: /gen-source
+    - image: registry.redhat.io/rhel8/buildah
+      name: digest-to-results
+      resources:
+        limits:
+          cpu: 200m
+          memory: 700Mi
+        requests:
+          cpu: 100m
+          memory: 700Mi
+      script: >-
+        cat $(workspaces.output.path)/image-digest | tee
+        /tekton/results/IMAGE_DIGEST  
+  volumes:
+    - emptyDir: {}
+      name: varlibcontainers
+    - emptyDir: {}
+      name: gen-source
+    - emptyDir: {}
+      name: postgresql-data
+  workspaces:
+    - name: output
+    - name: test-results
